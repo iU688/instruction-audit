@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Validate the files and metadata required for the v0.1.0 skill package."""
+"""Validate the files and metadata required for a releaseable skill package."""
 
 from __future__ import annotations
 
 import re
 import sys
 from pathlib import Path
+
+from audit_instructions import parse_frontmatter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,30 +17,19 @@ def fail(message: str) -> None:
     raise SystemExit(f"validation failed: {message}")
 
 
-def read_frontmatter(skill_path: Path) -> dict[str, str]:
-    text = skill_path.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        fail("SKILL.md must start with YAML frontmatter")
-    end = text.find("\n---", 4)
-    if end < 0:
-        fail("SKILL.md frontmatter is not closed")
-    fields: dict[str, str] = {}
-    for line in text[4:end].splitlines():
-        match = re.match(r"^(name|description):\s*[\"']?(.*?)[\"']?$", line)
-        if match:
-            fields[match.group(1)] = match.group(2).strip()
-    return fields
-
-
 def main() -> int:
     required = [
         "SKILL.md",
         "README.md",
+        "README.zh-CN.md",
         "LICENSE",
         "CHANGELOG.md",
         "CONTRIBUTING.md",
         "pyproject.toml",
         "scripts/audit_instructions.py",
+        "references/official-guidance.md",
+        "references/token-criteria.md",
+        "references/report-schema.md",
         "tests/test_audit_instructions.py",
         ".github/workflows/validate.yml",
     ]
@@ -46,18 +37,19 @@ def main() -> int:
         if not (ROOT / relative).is_file():
             fail(f"missing {relative}")
 
-    fields = read_frontmatter(ROOT / "SKILL.md")
+    fields, issues = parse_frontmatter(ROOT / "SKILL.md")
+    if issues:
+        fail("SKILL.md frontmatter: " + "; ".join(issue.detail for issue in issues))
     if fields.get("name") != ROOT.name:
         fail("frontmatter name must match the skill directory")
-    if not fields.get("description"):
-        fail("frontmatter description is empty")
 
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    if 'version = "0.1.0"' not in pyproject or 'requires-python = ">=3.9"' not in pyproject:
-        fail("pyproject.toml must declare version 0.1.0 and Python >=3.9")
+    version = re.search(r'^version\s*=\s*"([^"]+)"\s*$', pyproject, re.M)
+    if not version or 'requires-python = ">=3.9"' not in pyproject or '"PyYAML>=6.0,<7"' not in pyproject:
+        fail("pyproject.toml must declare a version, Python >=3.9, and PyYAML 6.x")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    if "## [0.1.0]" not in changelog:
-        fail("CHANGELOG.md must contain the 0.1.0 entry")
+    if f"## [{version.group(1)}]" not in changelog:
+        fail(f"CHANGELOG.md must contain the {version.group(1)} entry")
     print("package validation passed")
     return 0
 

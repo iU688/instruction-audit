@@ -2,6 +2,17 @@
 
 All notable changes to this skill are documented here.
 
+## Unreleased
+
+### Added
+
+- Complete Skill-package auditing: frontmatter, local Markdown links, missing references, UTF-8/readability and size checks, path traversal, symlinks, script file types, and dependency availability/callability/fallback reporting.
+- `--strict` exit codes and a versioned JSON schema (`1.0`).
+- Separate confirmed findings, heuristic candidates, package-integrity issues, dependency checks, and skipped/unreadable files.
+- Token-overuse candidates based on bounded-context/YAGNI signals; the auditor reports judgments only and does not emit edit suggestions.
+- Boundary tests for invalid metadata, missing and out-of-bound references, non-UTF-8 and oversized files, dependencies, and strict-mode exits.
+- Standards compliant YAML parsing with duplicate-key detection, nested Skill package discovery, and a conservative confirmed-conflict path for strict exit code `1`.
+
 ## [0.1.0] - 2026-10-10
 
 ### Added

@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 
@@ -53,7 +54,23 @@ class AuditInstructionsTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
             payload = json.loads(output.getvalue())
-            self.assertEqual(payload["files_scanned"], [str((selected / "AGENTS.md").resolve())])
+            self.assertEqual(payload["files_scanned"], [(selected / "AGENTS.md").resolve().as_posix()])
+
+    def test_explicit_package_root_does_not_scan_current_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            package = self.make_package(base)
+            current = base / "current"
+            current.mkdir()
+            (current / "AGENTS.md").write_text("Local instruction.\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--package-root", str(package), "--format", "json"],
+                cwd=str(current), capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["packages_scanned"], [package.resolve().as_posix()])
+            self.assertNotIn((current / "AGENTS.md").as_posix(), report["files_scanned"])
 
     def test_scan_root_named_build_is_not_skipped(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -92,6 +109,215 @@ class AuditInstructionsTests(unittest.TestCase):
             self.assertEqual(len(findings), 1)
             self.assertEqual(findings[0].severity, "medium")
             self.assertEqual(findings[0].confidence, "candidate")
+
+    def test_direct_unconditional_conflict_is_confirmed_and_strict_exit_one(self):
+        with tempfile.TemporaryDirectory() as temp:
+            instruction = Path(temp) / "AGENTS.md"
+            instruction.write_text("Always edit files.\nNever edit files.\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", str(temp), "--strict", "--format", "json"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(len(report["confirmed_findings"]), 1)
+            self.assertEqual(report["confirmed_findings"][0]["confidence"], "confirmed")
+            self.assertEqual(report["heuristic_candidates"], [])
+
+    def test_direct_rules_with_distinct_sections_remain_candidates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            instruction = Path(temp) / "AGENTS.md"
+            instruction.write_text("# Default\nNever edit files.\n# User requested edits\nAlways edit files.\n", encoding="utf-8")
+            findings, error = audit_instructions.scan_file(instruction, 512_000)
+            self.assertIsNone(error)
+            conflicts = [item for item in findings if item.category == "conflict"]
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(conflicts[0].confidence, "candidate")
+
+    def test_context_between_direct_rules_prevents_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            instruction = Path(temp) / "AGENTS.md"
+            instruction.write_text("Never edit files.\nFor generated files only:\nAlways edit files.\n", encoding="utf-8")
+            findings, error = audit_instructions.scan_file(instruction, 512_000)
+            self.assertIsNone(error)
+            conflicts = [item for item in findings if item.category == "conflict"]
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(conflicts[0].confidence, "candidate")
+
+    def make_package(self, root: Path, skill_text: Optional[str] = None) -> Path:
+        package = root / "demo-skill"
+        (package / "references").mkdir(parents=True)
+        (package / "scripts").mkdir()
+        (package / "assets").mkdir()
+        (package / "SKILL.md").write_text(
+            skill_text or "---\nname: demo-skill\ndescription: A test skill.\n---\n\nSee [guide](references/guide.md).\n",
+            encoding="utf-8",
+        )
+        (package / "references" / "guide.md").write_text("Guide.\n", encoding="utf-8")
+        (package / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+        return package
+
+    def test_package_frontmatter_and_references_pass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp))
+            report = audit_instructions.build_report([str(package)], [], 512_000)
+            self.assertEqual(report["package_integrity_issues"], [])
+            self.assertEqual(report["packages_scanned"], [package.resolve().as_posix()])
+            self.assertEqual(report["schema_version"], "1.0")
+            self.assertEqual(
+                set(report),
+                {
+                    "schema_version",
+                    "roots",
+                    "files_scanned",
+                    "packages_scanned",
+                    "confirmed_findings",
+                    "heuristic_candidates",
+                    "package_integrity_issues",
+                    "dependency_checks",
+                    "skipped",
+                    "unreadable",
+                    "findings",
+                },
+            )
+
+    def test_missing_reference_is_integrity_issue_and_strict_exit_two(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: test\n---\n\n[missing](references/foo.md)\n")
+            report = audit_instructions.build_report([str(package)], [], 512_000)
+            self.assertTrue(any(item["issue"] == "missing-reference" for item in report["package_integrity_issues"]))
+            result = subprocess.run([sys.executable, str(SCRIPT), "--root", str(package), "--strict", "--format", "json"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_nested_skill_package_is_discovered_and_checked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = self.make_package(Path(temp))
+            nested = parent / ".agents" / "skills" / "nested-skill"
+            nested.mkdir(parents=True)
+            (nested / "SKILL.md").write_text(
+                "---\nname: nested-skill\ndescription: Nested test.\n---\n[missing](references/missing.md)\n",
+                encoding="utf-8",
+            )
+            report = audit_instructions.build_report([str(parent)], [], 512_000)
+            self.assertEqual(set(report["packages_scanned"]), {parent.resolve().as_posix(), nested.resolve().as_posix()})
+            self.assertTrue(any(item["issue"] == "missing-reference" and "nested-skill" in item["path"] for item in report["package_integrity_issues"]))
+
+    def test_invalid_frontmatter_missing_name_and_description(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nlicense: MIT\n---\ntext\n")
+            issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
+            kinds = {item.issue for item in issues}
+            self.assertIn("missing-frontmatter-field", kinds)
+
+    def test_invalid_yaml_and_duplicate_field_are_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\nname: duplicate\ndescription: test\n---\ntext\n")
+            issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
+            kinds = {item.issue for item in issues}
+            self.assertIn("duplicate-frontmatter-key", kinds)
+            (package / "SKILL.md").write_text("---\nname: demo-skill\ndescription: [broken\n---\ntext\n", encoding="utf-8")
+            issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
+            kinds = {item.issue for item in issues}
+            self.assertIn("invalid-frontmatter", kinds)
+
+    def test_nested_metadata_frontmatter_is_supported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: test\nmetadata:\n  short-description: demo\n---\ntext\n")
+            issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
+            self.assertFalse([item for item in issues if item.issue == "invalid-frontmatter"])
+
+    def test_yaml_block_scalar_and_nested_mapping_are_parsed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: >\n  Audit source:\n  preserve evidence.\nmetadata:\n  interface:\n    label: Demo\n---\nBody.\n")
+            fields, issues = audit_instructions.parse_frontmatter(package / "SKILL.md")
+            self.assertEqual(issues, [])
+            self.assertIn("Audit source:", fields["description"])
+            self.assertEqual(fields["metadata"]["interface"]["label"], "Demo")
+
+    def test_invalid_yaml_structure_and_nested_duplicate_key_are_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: [broken\n---\nBody.\n")
+            _fields, issues = audit_instructions.parse_frontmatter(package / "SKILL.md")
+            self.assertTrue(any(item.issue == "invalid-frontmatter" for item in issues))
+            (package / "SKILL.md").write_text("---\nname: demo-skill\ndescription: test\nmetadata:\n  label: first\n  label: second\n---\nBody.\n", encoding="utf-8")
+            _fields, issues = audit_instructions.parse_frontmatter(package / "SKILL.md")
+            self.assertTrue(any(item.issue == "duplicate-frontmatter-key" for item in issues))
+
+    def test_token_overuse_is_candidate_without_suggestion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "SKILL.md"
+            path.write_text("Always re-read and summarize every file on every turn.\n", encoding="utf-8")
+            findings, error = audit_instructions.scan_file(path, 512_000)
+            self.assertIsNone(error)
+            token = [item for item in findings if item.category == "token-overuse"]
+            self.assertGreaterEqual(len(token), 1)
+            self.assertFalse(hasattr(token[0], "suggestion"))
+
+    def test_large_and_non_utf8_files_are_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp))
+            (package / "references" / "large.md").write_text("x" * 20, encoding="utf-8")
+            (package / "references" / "bad.md").write_bytes(b"\xff\xfe")
+            issues, unreadable, _checks = audit_instructions.audit_package(package, 10)
+            kinds = {item.issue for item in issues}
+            self.assertIn("oversized-file", kinds)
+            self.assertTrue(any("bad.md" in item for item in unreadable))
+
+    def test_dependency_check_reports_unavailable_without_installing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: test\nskill-dependencies:\n  - definitely-not-installed-command\n---\ntext\n")
+            issues, _unreadable, checks = audit_instructions.audit_package(package, 512_000)
+            self.assertEqual(checks[0].available, False)
+            self.assertEqual(checks[0].callable, False)
+            self.assertTrue(any(item.issue == "unavailable-dependency" for item in issues))
+
+    def test_out_of_bound_reference_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: test\n---\n\n[escape](../outside.md)\n")
+            issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
+            self.assertTrue(any(item.issue == "out-of-bound-reference" for item in issues))
+
+    def test_strict_bad_argument_uses_exit_three(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--max-file-bytes", "0", "--strict"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 3)
+
+    def test_multiple_roots_and_unicode_space_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp) / "中文 project"
+            first = base / "one"
+            second = base / "two"
+            first.mkdir(parents=True)
+            second.mkdir()
+            (first / "AGENTS.md").write_text("one\n", encoding="utf-8")
+            (second / "SKILL.md").write_text("two\n", encoding="utf-8")
+            report = audit_instructions.build_report([str(first), str(second)], [], 512_000)
+            self.assertEqual(len(report["files_scanned"]), 2)
+
+    def test_nonexistent_root_is_reported_in_strict_mode(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--root", "does-not-exist", "--strict", "--format", "json"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not found", result.stdout)
+
+    def test_unsupported_script_file_type_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp))
+            (package / "scripts" / "run.exe").write_bytes(b"not a script")
+            issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
+            self.assertTrue(any(item.issue == "unsupported-file-type" for item in issues))
+
+    def test_out_of_bound_symlink_is_reported_when_supported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            package = self.make_package(root)
+            outside = root / "outside.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+            link = package / "references" / "outside.txt"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable on this host")
+            issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
+            self.assertTrue(any(item.issue == "out-of-bound-symlink" for item in issues))
 
 
 if __name__ == "__main__":

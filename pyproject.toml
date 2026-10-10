@@ -7,7 +7,10 @@ name = "instruction-audit"
 version = "0.1.0"
 description = "Read-only auditing helpers for AGENTS.md and SKILL.md instructions"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["PyYAML>=6.0,<7"]
+
+[tool.setuptools]
+packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

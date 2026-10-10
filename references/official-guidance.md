@@ -11,4 +11,4 @@ Use this reference to calibrate findings, not as a reason to rewrite files autom
 - Do not force tests or checks after every change when the model can choose proportionate validation; keep explicit safe workflows where they are genuinely needed.
 - Define safe completion and persistence boundaries. A blanket “stop and ask” can be excessive, while a concrete permission or production-risk gate can be meaningful.
 
-These principles support the three audit categories but do not replace judgment. A directive is not a finding merely because it is long, cautious, or model-specific; report it only when the quoted text creates unnecessary work, an applicable contradiction, or a wait with no meaningful condition.
+These principles support the instruction audit categories but do not replace judgment. A directive is not a finding merely because it is long, cautious, or model-specific; report it only when the quoted text creates unnecessary work or context consumption, an applicable contradiction, or a wait with no meaningful condition.
