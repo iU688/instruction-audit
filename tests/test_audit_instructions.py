@@ -189,6 +189,21 @@ class AuditInstructionsTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(SCRIPT), "--root", str(package), "--strict", "--format", "json"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
 
+    def test_example_paths_are_candidates_but_explicit_links_are_checked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: test\n---\n\n```markdown\n[example](references/absent.md)\n```\nExample: `references/other.md`.\n[guide](references/guide.md)\n")
+            report = audit_instructions.build_report([str(package)], [], 512_000)
+            self.assertEqual(report["package_integrity_issues"], [])
+            self.assertTrue(any(item["category"] == "possible-reference" for item in report["heuristic_candidates"]))
+
+    def test_reference_document_can_use_package_root_relative_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp))
+            (package / "references" / "guide.md").write_text("Read `scripts/run.py` when needed.\n", encoding="utf-8")
+            report = audit_instructions.build_report([str(package)], [], 512_000)
+            self.assertEqual(report["package_integrity_issues"], [])
+            self.assertFalse(any(item["category"] == "possible-reference" for item in report["heuristic_candidates"]))
+
     def test_nested_skill_package_is_discovered_and_checked(self):
         with tempfile.TemporaryDirectory() as temp:
             parent = self.make_package(Path(temp))
@@ -302,8 +317,11 @@ class AuditInstructionsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             package = self.make_package(Path(temp))
             (package / "scripts" / "run.exe").write_bytes(b"not a script")
+            (package / "scripts" / "shell-helper").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             issues, _unreadable, _checks = audit_instructions.audit_package(package, 512_000)
-            self.assertTrue(any(item.issue == "unsupported-file-type" for item in issues))
+            unsupported = [item.path for item in issues if item.issue == "unsupported-file-type"]
+            self.assertTrue(any("run.exe" in path for path in unsupported))
+            self.assertFalse(any("shell-helper" in path for path in unsupported))
 
     def test_out_of_bound_symlink_is_reported_when_supported(self):
         with tempfile.TemporaryDirectory() as temp:

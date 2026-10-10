@@ -4,7 +4,7 @@
 
 Instruction Audit is a read-only Agent Skill and package auditor. It reviews `AGENTS.md` and complete `SKILL.md` packages for unnecessary work, contradictory directives, pointless waiting, and likely token overuse. It also checks frontmatter, local references, file readability, path boundaries, symlinks, supported script types, and declared dependencies. It reports judgments only; it never proposes or applies edits to inspected files.
 
-**Release status:** `v0.1.0` Beta / Preview. Findings are heuristic candidates and require human review. `--strict` is intended for CI integrity gates; a `1.0.0` release requires the cross-platform acceptance checks described in the project plan.
+**Release status:** `v1.0.0`. Heuristic candidates require human review; strict mode blocks confirmed instruction conflicts and package-integrity failures. The scanner is read-only and does not watch downloads in the background.
 
 ## Requirements
 
@@ -25,7 +25,9 @@ Use `--format json` for automation, `--strict` for CI, and `--package-root <skil
 
 Declare dependencies as a YAML list in `SKILL.md` frontmatter. Prefix an optional dependency with `?`; the report still records whether it is available, callable, and covered by a documented fallback.
 
-The JSON contract is documented in [`references/report-schema.md`](references/report-schema.md). It uses `schema_version: "1.0"` and stable ordering for repeatable inputs.
+The JSON contract is documented in [`references/report-schema.md`](references/report-schema.md). It uses `schema_version: "1.0"` and stable ordering for repeatable inputs. See [`RELEASE.md`](RELEASE.md) for the source archive manifest and reproducible build.
+
+Compatible packages use a standalone `SKILL.md` with Codex-style YAML frontmatter: `name`, `description`, and the supported optional fields `license`, `metadata`, `compatibility`, `argument-hint`, `allowed-tools`, and `skill-dependencies`. Custom frontmatter schemas are reported as integrity issues. Explicit local Markdown links are checked as package references; ambiguous backtick paths are candidates for human review. A Skill that intentionally shares files outside its own directory may produce out-of-bound candidates.
 
 The token-consumption check follows the same practical YAGNI/progressive-disclosure signal used by the [Ponytail project](https://github.com/DietrichGebert/ponytail): flag unconditional rereading, exhaustive output, and context loading that is not tied to the task. It does not claim to measure model tokens and does not issue rewrite suggestions.
 
@@ -33,6 +35,7 @@ The token-consumption check follows the same practical YAGNI/progressive-disclos
 
 ```text
 python -m unittest discover -s tests -v
+python scripts/validate_package.py
 python scripts/audit_instructions.py --root . --strict --format json
 python -X utf8 "<skill-root>/scripts/audit_instructions.py" --root <workspace> --format markdown
 ```

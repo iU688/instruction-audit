@@ -22,6 +22,7 @@ def main() -> int:
         "SKILL.md",
         "README.md",
         "README.zh-CN.md",
+        "RELEASE.md",
         "LICENSE",
         "CHANGELOG.md",
         "CONTRIBUTING.md",

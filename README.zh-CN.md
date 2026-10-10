@@ -13,7 +13,7 @@ Instruction Audit 是一个只读的 Agent Skill 和完整包审计器，用于�
 
 ## 版本状态
 
-当前版本：`v0.1.0`（Beta / Preview）。`--strict` 可用于 CI 完整性门禁；候选结果必须由用户或人工审阅者复核作用域、优先级和合法例外。该版本不提供后台文件系统监听，也不会自动审计每次下载。
+当前版本：`v1.0.0`。`--strict` 用于 CI 门禁；启发式候选结果仍须由用户或人工审阅者复核作用域、优先级和合法例外。Skill 不提供后台文件系统监听，也不会自动审计每次下载。源码包清单及可复现构建步骤见 [`RELEASE.md`](RELEASE.md)。
 
 ## 要求
 
@@ -35,6 +35,8 @@ python -X utf8 "<skill-root>/scripts/audit_instructions.py" --root <workspace-or
 依赖应在 `SKILL.md` frontmatter 中声明为 YAML 列表；可选依赖在名称前加 `?`。报告仍会记录依赖是否存在、是否可调用，以及是否声明了 fallback。
 
 JSON 结构契约见 [`references/report-schema.md`](references/report-schema.md)，当前 `schema_version` 为 `"1.0"`，相同输入会产生稳定排序的结果。
+
+兼容格式为独立目录中的 `SKILL.md`，使用 Codex 风格 YAML frontmatter：必填 `name`、`description`，可选 `license`、`metadata`、`compatibility`、`argument-hint`、`allowed-tools`、`skill-dependencies`。自定义 frontmatter 字段会列为完整性问题。明确的本地 Markdown 链接按包内引用检查；有歧义的反引号路径列为人工复核候选。若插件有意引用 Skill 目录外的共享文件，也可能出现越界候选。
 
 Token 判定参考 GitHub 上的 [Ponytail](https://github.com/DietrichGebert/ponytail) 所强调的 YAGNI 和渐进式披露原则：只标记无条件重复加载、无界输出和与任务无关的上下文扩张，不估算真实 token，也不提供改写建议。
 

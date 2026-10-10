@@ -12,6 +12,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from urllib.parse import unquote
 
 try:
     import yaml
@@ -361,19 +362,26 @@ def _is_text(path: Path) -> bool:
     return path.suffix.lower() in TEXT_EXTENSIONS or path.name.lower() in TARGET_NAMES
 
 
-def _local_link_targets(text: str) -> list[tuple[str, int]]:
-    targets: list[tuple[str, int]] = []
+def _local_link_targets(text: str) -> list[tuple[str, int, bool]]:
+    targets: list[tuple[str, int, bool]] = []
+    fenced = False
     for number, line in enumerate(text.splitlines(), 1):
-        for match in re.finditer(r"\[[^\]]*\]\(([^)]+)\)", line):
-            raw = match.group(1).strip().strip("<>\"").split("#", 1)[0].split("?", 1)[0]
+        if re.match(r"^\s*(```|~~~)", line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        prose = re.sub(r"`[^`]*`", "", line)
+        for match in re.finditer(r"\[[^\]]*\]\(([^)]+)\)", prose):
+            raw = unquote(match.group(1).strip().strip("<>\"").split("#", 1)[0].split("?", 1)[0])
             if raw and not raw.startswith(("http://", "https://", "mailto:", "#")):
-                targets.append((raw, number))
+                targets.append((raw, number, True))
         for match in re.finditer(r"`([^`]+)`", line):
             raw = match.group(1).strip().strip("<>\"").split("#", 1)[0].split("?", 1)[0]
             if raw.endswith(("/", "\\")):
                 continue
             if raw.startswith(("./", "../", "references/", "scripts/", "assets/")):
-                targets.append((raw, number))
+                targets.append((raw, number, False))
     return targets
 
 
@@ -412,7 +420,7 @@ def _check_dependency(value: str, root: Path, body: str) -> tuple[DependencyChec
     return check, None
 
 
-def audit_package(root: Path, max_bytes: int) -> tuple[list[PackageIssue], list[str], list[DependencyCheck]]:
+def audit_package(root: Path, max_bytes: int, candidate_sink: Optional[list[Finding]] = None) -> tuple[list[PackageIssue], list[str], list[DependencyCheck]]:
     issues: list[PackageIssue] = []
     unreadable: list[str] = []
     root = root.resolve()
@@ -450,9 +458,14 @@ def audit_package(root: Path, max_bytes: int) -> tuple[list[PackageIssue], list[
             size = entry.stat().st_size
             if size > max_bytes:
                 issues.append(PackageIssue("oversized-file", "medium", str(entry), f"File exceeds the {max_bytes} byte limit."))
-            if entry.parent.name.lower() == "scripts" and entry.suffix.lower() not in SUPPORTED_SCRIPT_EXTENSIONS:
+                continue
+            script_with_shebang = False
+            if entry.parent.name.lower() == "scripts" and not entry.suffix:
+                with entry.open("rb") as script_file:
+                    script_with_shebang = script_file.read(128).startswith(b"#!")
+            if entry.parent.name.lower() == "scripts" and entry.suffix.lower() not in SUPPORTED_SCRIPT_EXTENSIONS and not script_with_shebang:
                 issues.append(PackageIssue("unsupported-file-type", "medium", str(entry), f"Script directory contains unsupported extension '{entry.suffix or '[none]'}'."))
-            if _is_text(entry):
+            if _is_text(entry) or script_with_shebang:
                 try:
                     text = entry.read_text(encoding="utf-8")
                 except (OSError, UnicodeError) as exc:
@@ -460,12 +473,23 @@ def audit_package(root: Path, max_bytes: int) -> tuple[list[PackageIssue], list[
                     issues.append(PackageIssue("unreadable-file", "high", str(entry), str(exc)))
                     continue
                 if entry.suffix.lower() in {".md", ".markdown"}:
-                    for raw_target, line in _local_link_targets(text):
-                        target = (entry.parent / raw_target).resolve()
+                    source_lines = text.splitlines()
+                    for raw_target, line, explicit in _local_link_targets(text):
+                        target = (entry.parent / raw_target.replace("\\", "/")).resolve()
+                        if not target.exists() and raw_target.startswith(("references/", "scripts/", "assets/")):
+                            root_relative = (root / raw_target).resolve()
+                            if root_relative.exists() and _inside(root_relative, root):
+                                target = root_relative
                         if not _inside(target, root):
-                            issues.append(PackageIssue("out-of-bound-reference", "high", f"{entry}:{line}", f"Reference '{raw_target}' resolves outside the package."))
+                            if explicit:
+                                issues.append(PackageIssue("out-of-bound-reference", "high", f"{entry}:{line}", f"Reference '{raw_target}' resolves outside the package."))
+                            elif candidate_sink is not None:
+                                candidate_sink.append(Finding("possible-reference", "medium", str(entry), line, line, source_lines[line - 1].strip(), f"Backtick path '{raw_target}' resolves outside the package; it may be an example.", "candidate"))
                         elif not target.exists():
-                            issues.append(PackageIssue("missing-reference", "high", f"{entry}:{line}", f"Referenced file '{raw_target}' does not exist."))
+                            if explicit:
+                                issues.append(PackageIssue("missing-reference", "high", f"{entry}:{line}", f"Referenced file '{raw_target}' does not exist."))
+                            elif candidate_sink is not None:
+                                candidate_sink.append(Finding("possible-reference", "medium", str(entry), line, line, source_lines[line - 1].strip(), f"Backtick path '{raw_target}' does not exist; it may be an example.", "candidate"))
         except OSError as exc:
             issues.append(PackageIssue("unreadable-package-entry", "high", str(root), str(exc)))
     return issues, sorted(set(unreadable)), dependency_checks
@@ -509,7 +533,7 @@ def build_report(inputs: list[str], explicit_package_roots: list[str], max_bytes
     package_issues: list[PackageIssue] = []
     dependency_checks: list[DependencyCheck] = []
     for root in package_roots:
-        issues, package_unreadable, checks = audit_package(root, max_bytes)
+        issues, package_unreadable, checks = audit_package(root, max_bytes, candidates)
         package_issues.extend(issues)
         unreadable.extend(package_unreadable)
         dependency_checks.extend(checks)
