@@ -1,0 +1,4 @@
+interface:
+  display_name: "Instruction Audit"
+  short_description: "Audit agent instructions without editing files"
+  default_prompt: "Use $instruction-audit to audit current or newly downloaded AGENTS.md and Skills."
