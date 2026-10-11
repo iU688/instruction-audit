@@ -78,8 +78,8 @@ class AuditInstructionsTests(unittest.TestCase):
             package.mkdir()
             (package / "guide.md").write_text("No entrypoint.\n", encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), "--package-root", str(package), "--strict", "--format", "json"],
-                capture_output=True, text=True, check=False,
+                [sys.executable, "-X", "utf8", str(SCRIPT), "--package-root", str(package), "--strict", "--format", "json"],
+                capture_output=True, text=True, encoding="utf-8", check=False,
             )
             self.assertEqual(result.returncode, 2, result.stderr)
             report = json.loads(result.stdout)
@@ -189,7 +189,7 @@ class AuditInstructionsTests(unittest.TestCase):
             report = audit_instructions.build_report([str(package)], [], 512_000)
             self.assertEqual(report["package_integrity_issues"], [])
             self.assertEqual(report["packages_scanned"], [package.resolve().as_posix()])
-            self.assertEqual(report["schema_version"], "1.0")
+            self.assertEqual(report["schema_version"], "1.1")
             self.assertEqual(
                 set(report),
                 {
@@ -201,11 +201,67 @@ class AuditInstructionsTests(unittest.TestCase):
                     "heuristic_candidates",
                     "package_integrity_issues",
                     "dependency_checks",
+                    "workflow_consistency_checks",
                     "skipped",
                     "unreadable",
                     "findings",
                 },
             )
+
+    def test_explicit_stage_mapping_mismatch_is_confirmed_with_both_quotes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp))
+            (package / "guides").mkdir()
+            (package / "SKILL.md").write_text(
+                "---\nname: demo-skill\ndescription: test\n---\n"
+                "| Stage | Read | Purpose |\n| --- | --- | --- |\n"
+                "| **3. Brainstorming** | [guides/brainstorming.md](guides/brainstorming.md) | Generate ideas |\n",
+                encoding="utf-8",
+            )
+            (package / "guides" / "brainstorming.md").write_text(
+                "# Brainstorming (Stage 2 — generate and triage ideas)\n\n## Step 8\n", encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, "-X", "utf8", str(SCRIPT), "--package-root", str(package), "--strict", "--format", "json"],
+                capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["package_integrity_issues"], [])
+            self.assertEqual(report["workflow_consistency_checks"][0]["status"], "mismatch")
+            finding = next(item for item in report["confirmed_findings"] if item["category"] == "workflow-stage-mismatch")
+            self.assertEqual([(item["line"], Path(item["path"]).name) for item in finding["evidence"]], [(7, "SKILL.md"), (1, "brainstorming.md")])
+            self.assertIn("3. Brainstorming", finding["evidence"][0]["quote"])
+            self.assertEqual(finding["evidence"][1]["quote"], "# Brainstorming (Stage 2 — generate and triage ideas)")
+            markdown = subprocess.run(
+                [sys.executable, "-X", "utf8", str(SCRIPT), "--package-root", str(package), "--strict", "--format", "markdown"],
+                capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+            self.assertEqual(markdown.returncode, 1, markdown.stderr)
+            self.assertIn("## Workflow consistency checks", markdown.stdout)
+            self.assertIn("brainstorming.md:1", markdown.stdout)
+            self.assertIn("# Brainstorming (Stage 2 — generate and triage ideas)", markdown.stdout)
+
+    def test_stage_mapping_negative_cases_do_not_confirm(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp))
+            guides = package / "guides"
+            guides.mkdir()
+            (package / "SKILL.md").write_text(
+                "---\nname: demo-skill\ndescription: test\n---\n"
+                "| Stage | Read | Purpose |\n| --- | --- | --- |\n"
+                "| **3. Brainstorming** | [guide](guides/brainstorming.md) | Generate ideas |\n"
+                "| **4. Writing** | [guide](guides/writing.md) | Draft |\n"
+                "| **5. Evaluation** | [guide](guides/evaluation.md) | Evaluate |\n",
+                encoding="utf-8",
+            )
+            (guides / "brainstorming.md").write_text("# Brainstorming (Stage 3 — ideas)\n## Step 2: local step\n", encoding="utf-8")
+            (guides / "writing.md").write_text("# Writing\n## Stage 2 of this independent drafting flow\n", encoding="utf-8")
+            (guides / "evaluation.md").write_text("# Evaluation sub-process (Stage 2)\n", encoding="utf-8")
+            (guides / "unlinked.md").write_text("# Brainstorming (Stage 2)\n", encoding="utf-8")
+            report = audit_instructions.build_report([str(package)], [], 512_000)
+            self.assertFalse(any(item["category"] == "workflow-stage-mismatch" for item in report["confirmed_findings"]))
+            self.assertEqual([item["status"] for item in report["workflow_consistency_checks"]], ["matched", "not-comparable", "not-comparable"])
 
     def test_missing_reference_is_integrity_issue_and_strict_exit_two(self):
         with tempfile.TemporaryDirectory() as temp:

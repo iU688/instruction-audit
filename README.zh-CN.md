@@ -9,7 +9,7 @@ Instruction Audit 是一个只读的 Agent Skill 和完整包审计器，用于�
 
 报告只提供判定结果、原句、文件位置、原因、严重度和置信度，不提供修改建议。Skill 不会编辑、删除、执行、安装依赖、卸载或重写被审计的文件。
 
-完整包检查包括 YAML frontmatter、`name` 与目录名一致性、`references/`、`scripts/`、`assets/` 引用、Markdown 断链、UTF-8 可读性、文件大小、越界路径、符号链接、脚本文件类型以及声明依赖的可用性/可调用性/回退说明。
+完整包检查包括 YAML frontmatter、`name` 与目录名一致性、`references/`、`scripts/`、`assets/` 引用、Markdown 断链、UTF-8 可读性、文件大小、越界路径、符号链接、脚本文件类型以及声明依赖的可用性/可调用性/回退说明。另对入口文件明确列出的“阶段—直接链接指南”做有限一致性检查：只有指南一级标题指向同名阶段时才比较编号，报告双端原句和行号；不会全局搜索包内所有编号。
 
 ## 版本状态
 
@@ -34,7 +34,7 @@ python -X utf8 "<skill-root>/scripts/audit_instructions.py" --root <workspace-or
 
 依赖应在 `SKILL.md` frontmatter 中声明为 YAML 列表；可选依赖在名称前加 `?`。报告仍会记录依赖是否存在、是否可调用，以及是否声明了 fallback。
 
-JSON 结构契约见 [`references/report-schema.md`](references/report-schema.md)，当前 `schema_version` 为 `"1.0"`，相同输入会产生稳定排序的结果。
+JSON 结构契约见 [`references/report-schema.md`](references/report-schema.md)，当前 `schema_version` 为 `"1.1"`，相同输入会产生稳定排序的结果。报告区分指令文件扫描、包完整性检查和直接关联指南的流程一致性对照；退出码 `0` 不证明整个流程没有问题。
 
 兼容格式为独立目录中的 `SKILL.md`（文件名匹配不区分大小写），使用 Codex 风格 YAML frontmatter：必填 `name`、`description`，可选 `license`、`metadata`、`compatibility`、`argument-hint`、`allowed-tools`、`skill-dependencies`。自定义 frontmatter 字段会列为完整性问题。明确的本地 Markdown 链接（含可选标题）按包内引用检查；有歧义的反引号路径列为人工复核候选。若插件有意引用 Skill 目录外的共享文件，也可能出现越界候选。
 

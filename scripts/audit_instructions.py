@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 from urllib.parse import unquote
@@ -20,7 +20,7 @@ except ImportError:
     print("audit error: PyYAML 6.x is required to parse Skill frontmatter.", file=sys.stderr)
     raise SystemExit(3)
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", "dist", "build"}
 TARGET_NAMES = {"agents.md", "skill.md"}
 TEXT_EXTENSIONS = {".md", ".markdown", ".txt", ".py", ".pyw", ".sh", ".bash", ".ps1", ".js", ".mjs", ".cjs", ".ts", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".csv", ".html", ".css", ".xml", ".svg"}
@@ -38,6 +38,19 @@ class Finding:
     quote: str
     reason: str
     confidence: str = "heuristic"
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class WorkflowCheck:
+    entrypoint_path: str
+    entrypoint_line: int
+    guide_path: str
+    guide_line: int
+    stage_name: str
+    entrypoint_stage: int
+    guide_stage: Optional[int]
+    status: str
 
 
 @dataclass
@@ -558,6 +571,94 @@ def audit_package(root: Path, max_bytes: int, candidate_sink: Optional[list[Find
     return issues, sorted(set(unreadable)), dependency_checks
 
 
+def _stage_name(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().strip("* _`")).casefold()
+
+
+def _first_h1(lines: list[str]) -> Optional[tuple[int, str]]:
+    fenced = False
+    for number, line in enumerate(lines, 1):
+        if re.match(r"^\s*(```|~~~)", line):
+            fenced = not fenced
+            continue
+        if not fenced and re.match(r"^#\s+\S", line):
+            return number, line.strip()
+    return None
+
+
+def check_workflow_consistency(root: Path, max_bytes: int) -> tuple[list[WorkflowCheck], list[Finding]]:
+    """Compare only explicit stage-table links with their directly linked guide's H1."""
+    entrypoints = _skill_entrypoints(root)
+    if not entrypoints:
+        return [], []
+    entrypoint = entrypoints[0]
+    try:
+        if entrypoint.stat().st_size > max_bytes:
+            return [], []
+        lines = entrypoint.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return [], []
+    checks: list[WorkflowCheck] = []
+    findings: list[Finding] = []
+    in_stage_table = False
+    fenced = False
+    for number, line in enumerate(lines, 1):
+        if re.match(r"^\s*(```|~~~)", line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        if not line.lstrip().startswith("|"):
+            in_stage_table = False
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if _stage_name(cells[0]) in {"stage", "phase"} and _stage_name(cells[1]) in {"read", "guide", "reference"}:
+            in_stage_table = True
+            continue
+        if not in_stage_table:
+            continue
+        stage = re.fullmatch(r"\*{0,2}(\d+)\.\s+(.+?)\*{0,2}", cells[0])
+        if not stage:
+            continue
+        payloads = list(_markdown_link_payloads(cells[1]))
+        if len(payloads) != 1:
+            continue
+        raw = _markdown_link_destination(payloads[0])
+        if not raw or raw.startswith(("http://", "https://", "mailto:")):
+            continue
+        guide = (entrypoint.parent / raw.replace("\\", "/")).resolve()
+        if not _inside(guide, root) or guide.suffix.casefold() not in {".md", ".markdown"} or not guide.is_file():
+            continue
+        try:
+            if guide.stat().st_size > max_bytes:
+                continue
+            guide_lines = guide.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        heading = _first_h1(guide_lines)
+        if heading is None:
+            continue
+        guide_line, guide_quote = heading
+        title = re.fullmatch(r"#\s+(.+?)\s+\(\s*Stage\s+(\d+)\b[^)]*\)\s*", guide_quote, re.I)
+        name = stage.group(2).strip().strip("* _`")
+        guide_number = int(title.group(2)) if title and _stage_name(title.group(1)) == _stage_name(name) else None
+        status = "not-comparable" if guide_number is None else "mismatch" if int(stage.group(1)) != guide_number else "matched"
+        checks.append(WorkflowCheck(str(entrypoint), number, str(guide), guide_line, name, int(stage.group(1)), guide_number, status))
+        if status == "mismatch":
+            findings.append(Finding(
+                "workflow-stage-mismatch", "high", str(entrypoint), number, number, line.strip(),
+                f"The entrypoint maps {name} to stage {stage.group(1)}, but the directly linked guide's same-stage H1 says stage {guide_number}.",
+                "confirmed",
+                [
+                    {"path": str(entrypoint), "line": number, "quote": line.strip()},
+                    {"path": str(guide), "line": guide_line, "quote": guide_quote},
+                ],
+            ))
+    return checks, findings
+
+
 def _dedupe_findings(items: Iterable[Finding]) -> list[Finding]:
     seen: set[tuple[Any, ...]] = set()
     result: list[Finding] = []
@@ -571,7 +672,15 @@ def _dedupe_findings(items: Iterable[Finding]) -> list[Finding]:
 
 def _report_item(item: Any) -> dict[str, Any]:
     result = asdict(item)
-    result["path"] = result["path"].replace("\\", "/")
+    for key, value in result.items():
+        if key.endswith("path") and isinstance(value, str):
+            result[key] = value.replace("\\", "/")
+    if "evidence" in result:
+        if not result["evidence"]:
+            result.pop("evidence")
+        else:
+            for evidence in result["evidence"]:
+                evidence["path"] = evidence["path"].replace("\\", "/")
     return result
 
 
@@ -596,11 +705,15 @@ def build_report(inputs: list[str], explicit_package_roots: list[str], max_bytes
     candidates.extend(scan_cross_file_conflicts(records))
     package_issues: list[PackageIssue] = list(package_discovery_issues)
     dependency_checks: list[DependencyCheck] = []
+    workflow_checks: list[WorkflowCheck] = []
     for root in package_roots:
         issues, package_unreadable, checks = audit_package(root, max_bytes, candidates)
         package_issues.extend(issues)
         unreadable.extend(package_unreadable)
         dependency_checks.extend(checks)
+        checked, workflow_findings = check_workflow_consistency(root, max_bytes)
+        workflow_checks.extend(checked)
+        candidates.extend(workflow_findings)
     package_issues = sorted(package_issues, key=lambda item: (item.path.casefold(), item.issue, item.detail))
     candidates = _dedupe_findings(candidates)
     confirmed = [item for item in candidates if item.confidence == "confirmed"]
@@ -613,20 +726,23 @@ def build_report(inputs: list[str], explicit_package_roots: list[str], max_bytes
         "heuristic_candidates": [_report_item(item) for item in candidates if item.confidence != "confirmed"],
         "package_integrity_issues": [_report_item(item) for item in package_issues],
         "dependency_checks": [_report_item(item) for item in sorted(dependency_checks, key=lambda item: (item.path.casefold(), item.name.casefold()))],
+        "workflow_consistency_checks": [_report_item(item) for item in sorted(workflow_checks, key=lambda item: (item.entrypoint_path.casefold(), item.entrypoint_line, item.guide_path.casefold()))],
         "skipped": sorted({item.replace("\\", "/") for item in skipped}),
         "unreadable": sorted({item.replace("\\", "/") for item in unreadable}),
         "findings": [_report_item(item) for item in candidates],
     }
 
 
-def markdown_report(roots: list[str], files: list[Path], packages: list[Path], skipped: list[str], confirmed: list[Finding], candidates: list[Finding], package_issues: list[PackageIssue], unreadable: list[str], dependency_checks: list[DependencyCheck]) -> str:
-    out = ["# Instruction audit", "", "## Scope", "", f"- Schema version: `{SCHEMA_VERSION}`", f"- Roots: {', '.join(roots)}", f"- Files scanned: {len(files)}", f"- Packages scanned: {len(packages)}", f"- Skipped or unreadable: {len(skipped) + len(unreadable)}", "- Read-only: yes", "- Network access: not used", "- Audited scripts executed: no", ""]
+def markdown_report(roots: list[str], files: list[Path], packages: list[Path], skipped: list[str], confirmed: list[Finding], candidates: list[Finding], package_issues: list[PackageIssue], unreadable: list[str], dependency_checks: list[DependencyCheck], workflow_checks: list[WorkflowCheck]) -> str:
+    out = ["# Instruction audit", "", "## Scope", "", f"- Schema version: `{SCHEMA_VERSION}`", f"- Roots: {', '.join(roots)}", f"- Instruction files scanned: {len(files)}", f"- Packages integrity-checked: {len(packages)}", f"- Direct workflow mappings compared: {sum(item.status != 'not-comparable' for item in workflow_checks)}", f"- Direct workflow mappings not comparable: {sum(item.status == 'not-comparable' for item in workflow_checks)}", f"- Skipped or unreadable: {len(skipped) + len(unreadable)}", "- Read-only: yes", "- Network access: not used", "- Audited scripts executed: no", ""]
     out += ["## Confirmed findings", ""]
     if confirmed:
         for number, item in enumerate(confirmed, 1):
-            out += [f"### {number}. {item.category} ({item.severity})", "", f"- Location: `{item.path}:{item.start_line}-{item.end_line}`", f"- Original: `{item.quote}`", f"- Judgment: {item.reason}", f"- Confidence: {item.confidence}", ""]
+            out += [f"### {number}. {item.category} ({item.severity})", "", f"- Location: `{item.path}:{item.start_line}-{item.end_line}`", f"- Original: `{item.quote}`"]
+            out.extend(f"- Related evidence: `{evidence['path']}:{evidence['line']}` — `{evidence['quote']}`" for evidence in item.evidence[1:])
+            out += [f"- Judgment: {item.reason}", f"- Confidence: {item.confidence}", ""]
     else:
-        out += ["- None detected by the heuristic instruction rules.", ""]
+        out += ["- None detected by the implemented checks.", ""]
     out += ["## Heuristic candidates", ""]
     if candidates:
         for number, item in enumerate(candidates, 1):
@@ -643,6 +759,11 @@ def markdown_report(roots: list[str], files: list[Path], packages: list[Path], s
         out.extend(f"- `{item.name}`: available={str(item.available).lower()}, callable={str(item.callable).lower()}, optional={str(item.optional).lower()}, fallback={str(item.fallback_declared).lower()}" for item in dependency_checks)
     else:
         out.append("- No declared dependencies.")
+    out += ["", "## Workflow consistency checks", ""]
+    if workflow_checks:
+        out.extend(f"- `{item.entrypoint_path}:{item.entrypoint_line}` → `{item.guide_path}:{item.guide_line}`: {item.status} ({item.stage_name}, entrypoint stage {item.entrypoint_stage}, guide stage {item.guide_stage if item.guide_stage is not None else 'not comparable'})" for item in workflow_checks)
+    else:
+        out.append("- No explicit stage-table guide mappings found; workflow consistency was not assessed.")
     out += ["", "## Skipped or unreadable files", ""]
     if skipped or unreadable:
         out.extend(f"- {item}" for item in sorted(set(skipped + unreadable)))
@@ -672,7 +793,8 @@ def main() -> int:
             confirmed = [Finding(**item) for item in report["confirmed_findings"]]
             package_issues = [PackageIssue(**item) for item in report["package_integrity_issues"]]
             dependency_checks = [DependencyCheck(**item) for item in report["dependency_checks"]]
-            print(markdown_report(report["roots"], [Path(item) for item in report["files_scanned"]], [Path(item) for item in report["packages_scanned"]], report["skipped"], confirmed, candidates, package_issues, report["unreadable"], dependency_checks))
+            workflow_checks = [WorkflowCheck(**item) for item in report["workflow_consistency_checks"]]
+            print(markdown_report(report["roots"], [Path(item) for item in report["files_scanned"]], [Path(item) for item in report["packages_scanned"]], report["skipped"], confirmed, candidates, package_issues, report["unreadable"], dependency_checks, workflow_checks))
         if not args.strict:
             return 0
         if report["confirmed_findings"]:

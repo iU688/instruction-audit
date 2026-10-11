@@ -14,6 +14,7 @@ All notable changes to this skill are documented here.
 - Standards compliant YAML parsing with duplicate-key detection, nested Skill package discovery, and a conservative confirmed-conflict path for strict exit code `1`.
 - Release validation against installed complex Skill packages; example paths remain heuristic candidates, package-root-relative references resolve correctly, and extensionless scripts with shebangs are supported.
 - Release correction: strict scans now flag empty scopes and explicit package roots without entrypoints; Markdown link titles no longer become path text; Skill entrypoints are discovered case-insensitively.
+- Private release reissue: compare explicit entrypoint stage-table mappings with directly linked same-stage guide headings, retain both quotes and line numbers for confirmed mismatches, and distinguish workflow comparisons from package-integrity coverage in schema `1.1`.
 
 ## [0.1.0] - 2026-10-10
 
