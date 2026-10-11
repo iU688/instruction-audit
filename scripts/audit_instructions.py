@@ -104,37 +104,52 @@ def iter_files(inputs: Iterable[str]) -> tuple[list[Path], list[str]]:
     return sorted(files, key=lambda item: str(item).casefold()), sorted(skipped)
 
 
-def discover_package_roots(inputs: Iterable[str], package_roots: Iterable[str]) -> tuple[list[Path], list[str]]:
-    roots: set[Path] = set()
-    errors: list[str] = []
+def _skill_entrypoints(directory: Path) -> list[Path]:
+    try:
+        return sorted(
+            (entry for entry in directory.iterdir() if entry.name.casefold() == "skill.md" and entry.is_file() and not entry.is_symlink()),
+            key=lambda entry: (entry.name.casefold(), entry.name),
+        )
+    except OSError:
+        return []
 
-    def add_candidate(candidate: Path) -> None:
+
+def discover_package_roots(inputs: Iterable[str], package_roots: Iterable[str]) -> tuple[list[Path], list[PackageIssue]]:
+    roots: set[Path] = set()
+    issues: list[PackageIssue] = []
+
+    def add_candidate(candidate: Path, explicit: bool = False) -> None:
         candidate = candidate.expanduser()
         if not candidate.exists():
-            errors.append(f"{candidate} (package root not found)")
+            if explicit:
+                issues.append(PackageIssue("missing-package-root", "high", str(candidate), "Explicit package root does not exist."))
             return
         if candidate.is_file():
-            if candidate.name.lower() == "skill.md":
+            if candidate.name.casefold() == "skill.md":
                 roots.add(candidate.parent.resolve())
-            else:
-                errors.append(f"{candidate} (package root must contain SKILL.md)")
+            elif explicit:
+                issues.append(PackageIssue("missing-entrypoint", "high", str(candidate), "Explicit package root must be a directory containing a Skill entrypoint or the entrypoint file itself."))
             return
         resolved = candidate.resolve()
-        if (resolved / "SKILL.md").is_file():
+        if _skill_entrypoints(resolved):
             roots.add(resolved)
-        for entry in resolved.rglob("SKILL.md"):
+        elif explicit:
+            issues.append(PackageIssue("missing-entrypoint", "high", str(resolved), "Explicit package root does not contain SKILL.md (case-insensitive) at its top level."))
+        for entry in resolved.rglob("*"):
+            if entry.name.casefold() != "skill.md":
+                continue
             rel = entry.relative_to(resolved).parts
             if any(part.lower() in SKIP_DIRS for part in rel):
                 continue
-            if entry.is_symlink() or not _inside(entry, resolved):
+            if entry.is_symlink() or not entry.is_file() or not _inside(entry, resolved):
                 continue
             roots.add(entry.parent.resolve())
 
     for raw in inputs:
         add_candidate(Path(raw))
     for raw in package_roots:
-        add_candidate(Path(raw))
-    return sorted(roots, key=lambda item: str(item).casefold()), sorted(set(errors))
+        add_candidate(Path(raw), explicit=True)
+    return sorted(roots, key=lambda item: str(item).casefold()), sorted(issues, key=lambda item: (item.path.casefold(), item.issue))
 
 
 def line_quote(lines: list[str], index: int) -> tuple[str, int, int]:
@@ -362,6 +377,51 @@ def _is_text(path: Path) -> bool:
     return path.suffix.lower() in TEXT_EXTENSIONS or path.name.lower() in TARGET_NAMES
 
 
+def _markdown_link_payloads(line: str) -> Iterable[str]:
+    for match in re.finditer(r"\[[^\]]*\]\(", line):
+        start = match.end()
+        depth = 1
+        angle = False
+        quote: Optional[str] = None
+        for index in range(start, len(line)):
+            char = line[index]
+            if char == "\\":
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+                continue
+            if angle:
+                if char == ">":
+                    angle = False
+                continue
+            if char == "<":
+                angle = True
+            elif char in {'"', "'"} and (index == start or line[index - 1].isspace()):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    yield line[start:index]
+                    break
+
+
+def _markdown_link_destination(payload: str) -> str:
+    payload = payload.strip()
+    if payload.startswith("<"):
+        closing = payload.find(">")
+        if closing < 0:
+            return ""
+        destination = payload[1:closing].strip()
+        # Tolerate a title-like suffix inside angle brackets without treating it as a filename.
+        destination = re.sub(r'''\s+(?:"[^"]*"|'[^']*')$''', "", destination)
+    else:
+        destination = payload.split(None, 1)[0] if payload else ""
+    return unquote(destination.split("#", 1)[0].split("?", 1)[0])
+
+
 def _local_link_targets(text: str) -> list[tuple[str, int, bool]]:
     targets: list[tuple[str, int, bool]] = []
     fenced = False
@@ -372,8 +432,8 @@ def _local_link_targets(text: str) -> list[tuple[str, int, bool]]:
         if fenced:
             continue
         prose = re.sub(r"`[^`]*`", "", line)
-        for match in re.finditer(r"\[[^\]]*\]\(([^)]+)\)", prose):
-            raw = unquote(match.group(1).strip().strip("<>\"").split("#", 1)[0].split("?", 1)[0])
+        for payload in _markdown_link_payloads(prose):
+            raw = _markdown_link_destination(payload)
             if raw and not raw.startswith(("http://", "https://", "mailto:", "#")):
                 targets.append((raw, number, True))
         for match in re.finditer(r"`([^`]+)`", line):
@@ -388,7 +448,7 @@ def _local_link_targets(text: str) -> list[tuple[str, int, bool]]:
 def _iter_package_entries(root: Path) -> Iterable[Path]:
     for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
         current_path = Path(current)
-        dirs[:] = sorted([d for d in dirs if d.lower() not in SKIP_DIRS and not (current_path / d / "SKILL.md").is_file()], key=str.casefold)
+        dirs[:] = sorted([d for d in dirs if d.lower() not in SKIP_DIRS and not _skill_entrypoints(current_path / d)], key=str.casefold)
         for name in sorted(files, key=str.casefold):
             yield current_path / name
         for name in sorted(dirs, key=str.casefold):
@@ -424,9 +484,12 @@ def audit_package(root: Path, max_bytes: int, candidate_sink: Optional[list[Find
     issues: list[PackageIssue] = []
     unreadable: list[str] = []
     root = root.resolve()
-    skill_path = root / "SKILL.md"
-    if not skill_path.is_file():
-        return [PackageIssue("missing-entrypoint", "high", str(root), "Package must contain SKILL.md.")], [], []
+    entrypoints = _skill_entrypoints(root)
+    if not entrypoints:
+        return [PackageIssue("missing-entrypoint", "high", str(root), "Package must contain SKILL.md (case-insensitive).")], [], []
+    if len(entrypoints) > 1:
+        issues.append(PackageIssue("duplicate-entrypoint", "high", str(root), "Package contains multiple case-insensitive SKILL.md entrypoints."))
+    skill_path = entrypoints[0]
     frontmatter, fm_issues = parse_frontmatter(skill_path, max_bytes)
     issues.extend(fm_issues)
     dependency_checks: list[DependencyCheck] = []
@@ -514,8 +577,9 @@ def _report_item(item: Any) -> dict[str, Any]:
 
 def build_report(inputs: list[str], explicit_package_roots: list[str], max_bytes: int) -> dict[str, Any]:
     files, skipped = iter_files(inputs)
-    package_roots, package_discovery_errors = discover_package_roots(inputs, explicit_package_roots)
-    skipped.extend(package_discovery_errors)
+    package_roots, package_discovery_issues = discover_package_roots(inputs, explicit_package_roots)
+    if not files and not package_roots and not skipped and not package_discovery_issues:
+        skipped.append("No AGENTS.md or SKILL.md targets found in the requested roots.")
     candidates: list[Finding] = []
     records: list[tuple[str, str, Path, int, str]] = []
     unreadable: list[str] = []
@@ -530,7 +594,7 @@ def build_report(inputs: list[str], explicit_package_roots: list[str], max_bytes
             except (OSError, UnicodeError):
                 pass
     candidates.extend(scan_cross_file_conflicts(records))
-    package_issues: list[PackageIssue] = []
+    package_issues: list[PackageIssue] = list(package_discovery_issues)
     dependency_checks: list[DependencyCheck] = []
     for root in package_roots:
         issues, package_unreadable, checks = audit_package(root, max_bytes, candidates)

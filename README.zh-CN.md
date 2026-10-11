@@ -30,13 +30,13 @@ Instruction Audit 是一个只读的 Agent Skill 和完整包审计器，用于�
 python -X utf8 "<skill-root>/scripts/audit_instructions.py" --root <workspace-or-install-root> --format markdown
 ```
 
-使用 `--format json` 可生成机器可读报告，使用 `--strict` 启用退出码门禁，使用 `--package-root <skill-dir>` 显式指定包。退出码为：`0` 通过，`1` 已确认问题，`2` 包完整性/不可读输入，`3` 参数或运行错误。可重复传入 `--root` 扫描多个位置。扫描新下载的 Skill 时，应在下载完成后显式调用，而不是把它当作后台守护进程。
+使用 `--format json` 可生成机器可读报告，使用 `--strict` 启用退出码门禁，使用 `--package-root <skill-dir>` 显式指定包。严格模式退出码为：`0` 未发现阻断条件，`1` 已确认问题，`2` 包完整性问题、跳过/不可读输入或零目标扫描，`3` 参数或运行错误。显式指定的包目录必须在顶层包含 `SKILL.md`（文件名匹配不区分大小写）；路径配错不能在 CI 中空扫通过。可重复传入 `--root` 扫描多个位置。扫描新下载的 Skill 时，应在下载完成后显式调用，而不是把它当作后台守护进程。
 
 依赖应在 `SKILL.md` frontmatter 中声明为 YAML 列表；可选依赖在名称前加 `?`。报告仍会记录依赖是否存在、是否可调用，以及是否声明了 fallback。
 
 JSON 结构契约见 [`references/report-schema.md`](references/report-schema.md)，当前 `schema_version` 为 `"1.0"`，相同输入会产生稳定排序的结果。
 
-兼容格式为独立目录中的 `SKILL.md`，使用 Codex 风格 YAML frontmatter：必填 `name`、`description`，可选 `license`、`metadata`、`compatibility`、`argument-hint`、`allowed-tools`、`skill-dependencies`。自定义 frontmatter 字段会列为完整性问题。明确的本地 Markdown 链接按包内引用检查；有歧义的反引号路径列为人工复核候选。若插件有意引用 Skill 目录外的共享文件，也可能出现越界候选。
+兼容格式为独立目录中的 `SKILL.md`（文件名匹配不区分大小写），使用 Codex 风格 YAML frontmatter：必填 `name`、`description`，可选 `license`、`metadata`、`compatibility`、`argument-hint`、`allowed-tools`、`skill-dependencies`。自定义 frontmatter 字段会列为完整性问题。明确的本地 Markdown 链接（含可选标题）按包内引用检查；有歧义的反引号路径列为人工复核候选。若插件有意引用 Skill 目录外的共享文件，也可能出现越界候选。
 
 Token 判定参考 GitHub 上的 [Ponytail](https://github.com/DietrichGebert/ponytail) 所强调的 YAGNI 和渐进式披露原则：只标记无条件重复加载、无界输出和与任务无关的上下文扩张，不估算真实 token，也不提供改写建议。
 

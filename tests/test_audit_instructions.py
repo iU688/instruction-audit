@@ -72,6 +72,32 @@ class AuditInstructionsTests(unittest.TestCase):
             self.assertEqual(report["packages_scanned"], [package.resolve().as_posix()])
             self.assertNotIn((current / "AGENTS.md").as_posix(), report["files_scanned"])
 
+    def test_explicit_package_root_without_entrypoint_blocks_strict_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp) / "not-a-skill"
+            package.mkdir()
+            (package / "guide.md").write_text("No entrypoint.\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--package-root", str(package), "--strict", "--format", "json"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["packages_scanned"], [])
+            self.assertTrue(any(item["issue"] == "missing-entrypoint" for item in report["package_integrity_issues"]))
+
+    def test_strict_mode_rejects_zero_target_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", str(temp), "--strict", "--format", "json"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["files_scanned"], [])
+            self.assertEqual(report["packages_scanned"], [])
+            self.assertTrue(any("No AGENTS.md or SKILL.md targets" in item for item in report["skipped"]))
+
     def test_scan_root_named_build_is_not_skipped(self):
         with tempfile.TemporaryDirectory() as temp:
             scan_root = Path(temp) / "build"
@@ -189,6 +215,37 @@ class AuditInstructionsTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(SCRIPT), "--root", str(package), "--strict", "--format", "json"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
 
+    def test_markdown_link_titles_do_not_become_part_of_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(
+                Path(temp),
+                '---\nname: demo-skill\ndescription: test\n---\n\n'
+                '[plain](references/guide.md "Guide")\n'
+                '[angled](<references/guide.md> "Guide")\n'
+                '[title-inside-angle](<references/guide.md "Guide">)\n'
+                '[parentheses](references/guide(v2).md "Guide (v2)")\n',
+            )
+            (package / "references" / "guide(v2).md").write_text("Guide v2.\n", encoding="utf-8")
+            report = audit_instructions.build_report([str(package)], [], 512_000)
+            self.assertEqual(report["package_integrity_issues"], [])
+
+    def test_lowercase_skill_entrypoint_is_discovered_and_audited(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = self.make_package(Path(temp))
+            source = package / "SKILL.md"
+            content = source.read_text(encoding="utf-8")
+            source.unlink()
+            (package / "skill.md").write_text(content, encoding="utf-8")
+            report = audit_instructions.build_report([str(package)], [], 512_000)
+            self.assertEqual(report["packages_scanned"], [package.resolve().as_posix()])
+            self.assertEqual(report["files_scanned"], [(package / "skill.md").resolve().as_posix()])
+            self.assertEqual(report["package_integrity_issues"], [])
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--package-root", str(package), "--strict", "--format", "json"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_example_paths_are_candidates_but_explicit_links_are_checked(self):
         with tempfile.TemporaryDirectory() as temp:
             package = self.make_package(Path(temp), "---\nname: demo-skill\ndescription: test\n---\n\n```markdown\n[example](references/absent.md)\n```\nExample: `references/other.md`.\n[guide](references/guide.md)\n")
@@ -216,6 +273,19 @@ class AuditInstructionsTests(unittest.TestCase):
             report = audit_instructions.build_report([str(parent)], [], 512_000)
             self.assertEqual(set(report["packages_scanned"]), {parent.resolve().as_posix(), nested.resolve().as_posix()})
             self.assertTrue(any(item["issue"] == "missing-reference" and "nested-skill" in item["path"] for item in report["package_integrity_issues"]))
+
+    def test_nested_lowercase_skill_is_a_separate_package(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = self.make_package(Path(temp))
+            nested = parent / "references" / "nested-skill"
+            nested.mkdir()
+            (nested / "skill.md").write_text(
+                "---\nname: nested-skill\ndescription: Nested test.\n---\nBody.\n",
+                encoding="utf-8",
+            )
+            report = audit_instructions.build_report([str(parent)], [], 512_000)
+            self.assertEqual(set(report["packages_scanned"]), {parent.resolve().as_posix(), nested.resolve().as_posix()})
+            self.assertEqual(report["package_integrity_issues"], [])
 
     def test_invalid_frontmatter_missing_name_and_description(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -2,7 +2,7 @@
 
 All notable changes to this skill are documented here.
 
-## [1.0.0] - 2026-10-10
+## [1.0.0] - 2026-10-11
 
 ### Added
 
@@ -13,6 +13,7 @@ All notable changes to this skill are documented here.
 - Boundary tests for invalid metadata, missing and out-of-bound references, non-UTF-8 and oversized files, dependencies, and strict-mode exits.
 - Standards compliant YAML parsing with duplicate-key detection, nested Skill package discovery, and a conservative confirmed-conflict path for strict exit code `1`.
 - Release validation against installed complex Skill packages; example paths remain heuristic candidates, package-root-relative references resolve correctly, and extensionless scripts with shebangs are supported.
+- Release correction: strict scans now flag empty scopes and explicit package roots without entrypoints; Markdown link titles no longer become path text; Skill entrypoints are discovered case-insensitively.
 
 ## [0.1.0] - 2026-10-10
 
